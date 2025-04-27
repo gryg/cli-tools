@@ -1,0 +1,2 @@
+[console_scripts]
+pathsum = pathsum_tool.main:cli_entry_point

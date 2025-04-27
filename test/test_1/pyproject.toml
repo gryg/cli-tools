@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"] # Requires a reasonably modern setuptools
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pathsum"
+version = "0.1.0"
+description = "Summarizes text files in a directory tree into a single file."
+readme = "README.md" 
+requires-python = ">=3.7" # Specify minimum Python version
+license = {text = "MIT"} # Or choose another license
+# authors = [{name="spktr", email="spectorinquiries@gmail.com"}]
+
+# This is the crucial part for the command-line script:
+[project.scripts]
+pathsum = "pathsum_tool.main:cli_entry_point"
+# This above means: create a command named 'pathsum' that executes the
+# 'cli_entry_point' function found in the 'main.py' module within the 'pathsum_tool' package.

@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+src/pathsum_deprecate.py
+src/pathsum.egg-info/PKG-INFO
+src/pathsum.egg-info/SOURCES.txt
+src/pathsum.egg-info/dependency_links.txt
+src/pathsum.egg-info/entry_points.txt
+src/pathsum.egg-info/top_level.txt
+src/pathsum_tool/__init__.py
+src/pathsum_tool/main.py
