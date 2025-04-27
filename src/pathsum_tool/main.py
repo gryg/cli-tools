@@ -18,7 +18,6 @@ import fnmatch # For more flexible pattern matching (optional enhancement shown)
 
 
 # --- Helper Functions ---
-
 def is_likely_text_file(file_path):
     """
     Attempts to read a small portion of the file to determine if it's likely text.
@@ -28,15 +27,19 @@ def is_likely_text_file(file_path):
         # Check if file is empty first
         if os.path.getsize(file_path) == 0:
             return True # Treat empty files as text
+        # Check if it's a regular file and not a symlink etc. that might cause issues
+        if not os.path.isfile(file_path):
+             # print(f"Skipping non-regular file: {file_path}")
+             return False
         with open(file_path, 'r', encoding='utf-8', errors='strict') as f:
             f.read(1024) # Try reading a small chunk
         return True
     except UnicodeDecodeError:
         # print(f"Skipping binary file (UnicodeDecodeError): {file_path}")
         return False
-    except OSError: # Handle cases like permission errors or special files
-        # print(f"Skipping non-regular or inaccessible file: {file_path}")
-        return False
+    except OSError as e: # Handle cases like permission errors or special files
+         # print(f"Skipping non-regular or inaccessible file {file_path}: {e}")
+         return False
     except Exception as e:
         # Handle other potential errors like permission issues during read
         print(f"Warning: Could not read file {file_path}. Error: {e}")
@@ -67,8 +70,9 @@ def normalize_path(path):
 # --- Main Logic ---
 
 def create_summary(output_filename, start_dir='.',
-                   exclude_dirs=None, exclude_files=None,
-                   include_patterns=None, exclude_patterns=None):
+                   include_dirs=None, include_files=None, include_patterns=None,
+                   exclude_dirs=None, exclude_files=None, exclude_patterns=None,
+                   inclusion_mode=False):
     """
     Walks the directory tree, reads text files based on include/exclude rules,
     and writes their content to the output file, separated by headers.
@@ -76,128 +80,146 @@ def create_summary(output_filename, start_dir='.',
     Args:
         output_filename (str): The name of the summary file to create.
         start_dir (str): The root directory to start scanning.
-        exclude_dirs (list): List of directory paths (relative) to exclude directly.
-        exclude_files (list): List of file paths/names (relative) to exclude directly.
-        include_patterns (list): List of fnmatch patterns. If provided, ONLY paths
-                                 matching these patterns are considered.
-        exclude_patterns (list): List of fnmatch patterns (from file + CLI) to exclude.
+        include_dirs (set): Set of normalized directory paths to include directly.
+        include_files (set): Set of normalized file paths/names to include directly.
+        include_patterns (list): List of fnmatch patterns from include file.
+        exclude_dirs (set): Set of normalized directory paths to exclude directly.
+        exclude_files (set): Set of normalized file paths/names to exclude directly.
+        exclude_patterns (list): List of fnmatch patterns (from file + CLI excludes).
+        inclusion_mode (bool): True if any include flag was specified by the user.
     """
-    exclude_dirs = exclude_dirs or []
-    exclude_files = exclude_files or []
+    # Ensure inputs are sets/lists to avoid None checks later
+    include_dirs = include_dirs or set()
+    include_files = include_files or set()
     include_patterns = include_patterns or []
+    exclude_dirs = exclude_dirs or set()
+    exclude_files = exclude_files or set()
     exclude_patterns = exclude_patterns or [] # Combined CLI and file patterns
 
-    # --- Prepare patterns and initial exclusions ---
-    # Normalize direct exclusions for simple matching first
-    # Use normpath for OS-specific normalization, then normalize_path for matching
-    normalized_exclude_dirs = {normalize_path(os.path.normpath(d)) for d in exclude_dirs}
-    normalized_exclude_files = {normalize_path(os.path.normpath(f)) for f in exclude_files}
-
-    # Also add direct file exclusions to the pattern list for fnmatch consistency
-    exclude_patterns.extend(normalized_exclude_files)
-    # Add directory exclusions potentially as patterns too (e.g., ending with /)
-    exclude_patterns.extend([d + '/' if not d.endswith('/') else d for d in normalized_exclude_dirs])
-
+    # --- Prepare combined exclusion patterns (CLI + File) ---
+    # Add direct file/dir exclusions to the pattern list for comprehensive fnmatch checks
+    # Note: Direct checks are still performed first for efficiency where applicable
+    combined_exclude_patterns = list(exclude_patterns) # Start with patterns from file
+    combined_exclude_patterns.extend(exclude_files) # Add direct files
+    combined_exclude_patterns.extend([d + '/' if not d.endswith('/') else d for d in exclude_dirs]) # Add direct dirs
 
     # Always exclude the summary file itself
-    summary_file_norm = normalize_path(os.path.normpath(output_filename))
-    normalized_exclude_files.add(summary_file_norm)
-    # Add summary file to patterns as well to be safe
-    if summary_file_norm not in exclude_patterns:
-         exclude_patterns.append(summary_file_norm)
+    summary_file_norm = normalize_path(os.path.normpath(os.path.join(start_dir, output_filename)))
+    exclude_files.add(summary_file_norm)
+    if summary_file_norm not in combined_exclude_patterns:
+         combined_exclude_patterns.append(summary_file_norm)
 
-
+    # --- Logging ---
     skipped_dirs_count = 0
     skipped_files_count = 0
     processed_files_count = 0
-    explicitly_included_count = 0
-    explicitly_excluded_count = 0
+    considered_by_include_count = 0
+    excluded_count = 0
 
     print(f"Starting summary creation. Output file: {output_filename}")
-    if include_patterns:
-        print(f"Inclusion mode active. Only considering paths matching: {include_patterns}")
-    print(f"Excluding directories directly matching: {normalized_exclude_dirs}")
-    print(f"Excluding files directly matching: {normalized_exclude_files}")
-    print(f"Excluding paths matching patterns: {exclude_patterns}")
+    if inclusion_mode:
+        print("Inclusion Mode ACTIVE (only specified items will be considered)")
+        if include_dirs: print(f"Including directories: {include_dirs}")
+        if include_files: print(f"Including files: {include_files}")
+        if include_patterns: print(f"Including paths matching patterns: {include_patterns}")
+    else:
+        print("Inclusion Mode OFF (all items considered by default)")
+
+    print("--- Exclusions ---")
+    if exclude_dirs: print(f"Excluding directories directly: {exclude_dirs}")
+    if exclude_files: print(f"Excluding files directly: {exclude_files}")
+    if exclude_patterns: print(f"Excluding paths matching patterns from file: {exclude_patterns}") # Original file patterns
+    print(f"(Effective exclude patterns including direct rules: {combined_exclude_patterns})") # All patterns
     print("-" * 20)
 
+    # --- File Processing ---
     try:
-        with open(output_filename, 'w', encoding='utf-8') as outfile:
+        with open(os.path.join(start_dir, output_filename), 'w', encoding='utf-8') as outfile:
             # os.walk iterates through directory tree top-down
             for dirpath, dirnames, filenames in os.walk(start_dir, topdown=True):
 
+                current_dir_abs = os.path.normpath(dirpath)
+                current_dir_rel = normalize_path(os.path.relpath(current_dir_abs, start_dir))
+                # Handle root case where relative path is '.'
+                if current_dir_rel == '.':
+                    current_dir_rel = '' # Use empty string for root checks below
+
                 # --- Directory Exclusion (applied before descending) ---
-                dirs_to_remove = []
-                original_dirnames = list(dirnames) # Copy for iteration while modifying
+                dirs_to_remove = set()
+                original_dirnames = list(dirnames) # Copy for iteration
 
                 for dirname in original_dirnames:
-                    current_dir_abs = os.path.normpath(os.path.join(dirpath, dirname))
-                    current_dir_rel = normalize_path(os.path.relpath(current_dir_abs, start_dir))
-                    current_dir_rel_with_slash = current_dir_rel + '/'
+                    sub_dir_abs = os.path.normpath(os.path.join(dirpath, dirname))
+                    sub_dir_rel = normalize_path(os.path.relpath(sub_dir_abs, start_dir))
+                    sub_dir_rel_with_slash = sub_dir_rel + '/'
 
-
-                    # Check direct exclusion first
                     is_excluded = False
-                    if current_dir_rel in normalized_exclude_dirs:
+                    if sub_dir_rel in exclude_dirs: # Direct dir path match
                         is_excluded = True
                     else:
-                        # Check pattern exclusion (match against path with trailing slash)
-                        for pattern in exclude_patterns:
-                            # Match full relative path or just the directory name
-                            if fnmatch.fnmatch(current_dir_rel_with_slash, pattern) or \
-                               fnmatch.fnmatch(dirname, pattern.rstrip('/')): # Match dir name if pattern doesn't specify path
+                        # Check pattern exclusion
+                        for pattern in combined_exclude_patterns:
+                            if fnmatch.fnmatch(sub_dir_rel_with_slash, pattern) or \
+                               fnmatch.fnmatch(sub_dir_rel, pattern) or \
+                               fnmatch.fnmatch(dirname, pattern.rstrip('/')):
                                 is_excluded = True
                                 break
 
                     if is_excluded:
-                        # print(f"Excluding directory tree: {current_dir_rel}")
-                        dirs_to_remove.append(dirname)
-                        skipped_dirs_count += 1 # Simplistic count
+                        # print(f"Excluding directory tree: {sub_dir_rel}")
+                        dirs_to_remove.add(dirname)
+                        skipped_dirs_count += 1
 
-                # Remove the directories from the list os.walk will visit next
-                for d in dirs_to_remove:
-                     if d in dirnames: # Avoid error if already removed
-                         dirnames.remove(d)
+                # Remove excluded directories efficiently
+                dirnames[:] = [d for d in dirnames if d not in dirs_to_remove]
 
                 # --- File Processing and Filtering ---
                 for filename in filenames:
                     file_abs_path = os.path.normpath(os.path.join(dirpath, filename))
                     file_rel_path = normalize_path(os.path.relpath(file_abs_path, start_dir))
 
-                    # --- Step 1: Inclusion Check (if include_patterns is active) ---
-                    should_include = not include_patterns # Include if list is empty (default)
-                    if include_patterns:
-                        for pattern in include_patterns:
-                            # Match against relative path or just filename
-                            if fnmatch.fnmatch(file_rel_path, pattern) or fnmatch.fnmatch(filename, pattern):
-                                should_include = True
-                                break
-                        if not should_include:
-                            # If include patterns exist but this file doesn't match any, skip it.
-                            # print(f"Skipping (doesn't match include patterns): {file_rel_path}")
+                    # --- Step 1: Inclusion Check (only if inclusion_mode is ON) ---
+                    if inclusion_mode:
+                        should_consider = False
+                        # Check direct file include
+                        if file_rel_path in include_files or filename in include_files:
+                            should_consider = True
+                        # Check if file is within an included directory
+                        if not should_consider:
+                            for inc_dir in include_dirs:
+                                # Check if file path starts with included dir path
+                                # Add '/' to avoid partial matches (e.g., 'src-data' matching 'src')
+                                if file_rel_path.startswith(inc_dir + '/'):
+                                    should_consider = True
+                                    break
+                        # Check pattern include
+                        if not should_consider:
+                            for pattern in include_patterns:
+                                if fnmatch.fnmatch(file_rel_path, pattern) or fnmatch.fnmatch(filename, pattern):
+                                    should_consider = True
+                                    break
+
+                        if not should_consider:
+                            # If inclusion mode is on, but this file doesn't match any rule, skip.
                             skipped_files_count += 1
                             continue
                         else:
-                            # Only count if include_patterns was active and we passed
-                            explicitly_included_count +=1
+                            considered_by_include_count += 1
 
-
-                    # --- Step 2: Exclusion Check ---
+                    # --- Step 2: Exclusion Check (Always applied) ---
                     is_excluded = False
-                    # Check direct file exclusion first
-                    if file_rel_path in normalized_exclude_files or filename in normalized_exclude_files:
-                         is_excluded = True
+                    # Direct file exclude check
+                    if file_rel_path in exclude_files or filename in exclude_files:
+                        is_excluded = True
                     else:
-                        # Check pattern exclusion
-                        for pattern in exclude_patterns:
-                            # Match against relative path or just filename
+                        # Pattern exclude check
+                        for pattern in combined_exclude_patterns:
                             if fnmatch.fnmatch(file_rel_path, pattern) or fnmatch.fnmatch(filename, pattern):
                                 is_excluded = True
                                 break
 
                     if is_excluded:
-                        # print(f"Skipping (excluded): {file_rel_path}")
-                        explicitly_excluded_count += 1
+                        excluded_count += 1
                         skipped_files_count += 1
                         continue
 
@@ -205,7 +227,8 @@ def create_summary(output_filename, start_dir='.',
                     if is_likely_text_file(file_abs_path):
                         # print(f"Adding: {file_rel_path}")
                         try:
-                            with open(file_abs_path, 'r', encoding='utf-8', errors='ignore') as infile: # Use ignore on final read just in case
+                            # Ensure we are reading from the absolute path
+                            with open(file_abs_path, 'r', encoding='utf-8', errors='ignore') as infile:
                                 content = infile.read()
 
                             # Write header (using normalized relative path)
@@ -227,11 +250,11 @@ def create_summary(output_filename, start_dir='.',
     print("-" * 20)
     print(f"Summary creation complete: {output_filename}")
     print(f"Processed {processed_files_count} text files.")
-    if include_patterns:
-        print(f"Considered {explicitly_included_count} files based on include patterns.")
+    if inclusion_mode:
+         print(f"Considered {considered_by_include_count} files based on inclusion rules.")
     print(f"Skipped {skipped_files_count} files (excluded, non-matching include, binary, or errors).")
-    if explicitly_excluded_count > 0:
-        print(f"({explicitly_excluded_count} files matched explicit exclude rules/patterns).")
+    if excluded_count > 0:
+        print(f"({excluded_count} files matched exclude rules/patterns).")
     if skipped_dirs_count > 0:
       print(f"Skipped descending into {skipped_dirs_count} excluded directory trees.")
 
@@ -245,32 +268,50 @@ def cli_entry_point():
     parser = argparse.ArgumentParser(
         description="Summarize text files in a directory tree into a single file, with options for inclusion and exclusion.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Pattern files (for --include-from/--exclude-from) use .gitignore-like syntax:
-  - Each line is a pattern.
-  - Lines starting with # are comments.
-  - Blank lines are ignored.
-  - Patterns are matched against paths relative to the starting directory (using forward slashes '/').
-  - Standard wildcards (*, ?, [seq]) can be used.
-  - If a pattern ends with '/', it only matches directories.
+        epilog="""Inclusion/Exclusion Logic:
+  - If NO --include flags (--include-dirs, --include-files, --include-from) are used,
+    all files under the current path are considered by default.
+  - If ANY --include flag IS used, only files/directories matching at least one
+    inclusion rule are considered.
+  - Exclusion flags/files (--exclude-*) are always applied last. A file must pass
+    inclusion checks (if active) AND NOT match any exclusion rule to be added.
+
+Pattern files (for --include-from/--exclude-from) use .gitignore-like syntax:
+  - Each line is a pattern (# lines and blank lines ignored).
+  - Patterns match paths relative to the starting directory (use '/').
+  - Wildcards (*, ?, [seq]) work. '/' at end matches directories.
 
 Examples:
-  # Basic usage
-  pathsum
-
-  # Exclude specific directories and files via CLI
-  pathsum --exclude-dirs node_modules build dist .git venv --exclude-files secrets.yaml *.log
-
-  # Exclude patterns from a file (e.g., .pathsumignore)
-  pathsum --exclude-from .pathsumignore
-
-  # ONLY include files/dirs matching patterns in a file (e.g., .pathsuminclude)
-  pathsum --include-from .pathsuminclude
-
-  # Combine include file and exclude file/flags
-  pathsum --include-from .pathsuminclude --exclude-from .gitignore --exclude-files temp.txt
+  pathsum                   # Default: Include everything (except summary file)
+  pathsum --exclude-dirs node_modules build .git venv # Exclude common dirs
+  pathsum --exclude-from .gitignore                  # Use .gitignore for exclusions
+  pathsum --include-dirs src tests --include-files config.yaml # Only include these
+  pathsum --include-from .pathsuminclude --exclude-from .gitignore # Combine rules
 """
     )
 
+    # Inclusion Arguments
+    parser.add_argument(
+        "--include-dirs",
+        nargs='+',
+        metavar='DIR',
+        default=[],
+        help="Space-separated list of directory paths to include. Activates inclusion mode."
+    )
+    parser.add_argument(
+        "--include-files",
+        nargs='+',
+        metavar='FILE',
+        default=[],
+        help="Space-separated list of file names or paths to include. Activates inclusion mode."
+    )
+    parser.add_argument(
+        "--include-from",
+        metavar='FILE',
+        help="Specify a file containing patterns. ONLY items matching these patterns will be included. Activates inclusion mode."
+    )
+
+    # Exclusion Arguments
     parser.add_argument(
         "--exclude-dirs",
         nargs='+',
@@ -290,45 +331,52 @@ Examples:
         metavar='FILE',
         help="Specify a file containing patterns of files/directories to exclude (like .gitignore)."
     )
-    parser.add_argument(
-        "--include-from",
-        metavar='FILE',
-        help="Specify a file containing patterns. ONLY files/directories matching these patterns will be included."
-    )
 
     args = parser.parse_args()
 
+    # --- Determine if Inclusion Mode is Active ---
+    inclusion_mode_active = bool(args.include_dirs or args.include_files or args.include_from)
+
     # --- Process patterns from files ---
-    include_patterns = []
+    include_patterns_from_file = []
     if args.include_from:
-        include_patterns = parse_pattern_file(args.include_from)
-        if not include_patterns:
-             print(f"Warning: Include file '{args.include_from}' was empty or not found. No files will be included.")
-             # Decide if you want to exit or proceed (currently proceeds, resulting in empty output)
-             # return # Or exit
+        include_patterns_from_file = parse_pattern_file(args.include_from)
+        if not include_patterns_from_file and not args.include_dirs and not args.include_files:
+             print(f"Warning: Include file '{args.include_from}' was empty or not found, and no other --include flags used. No files will be included.")
+             # Consider exiting if inclusion mode is active but no valid rules exist
+             # return
 
     exclude_patterns_from_file = []
     if args.exclude_from:
         exclude_patterns_from_file = parse_pattern_file(args.exclude_from)
 
-    # Combine CLI excludes and file excludes into a single list for create_summary
-    # Note: create_summary further processes these patterns
-    all_exclude_patterns = exclude_patterns_from_file # Start with patterns from file
+    # Normalize direct paths for efficient lookup and consistent matching
+    # Use sets for direct include/exclude for faster lookups
+    norm_include_dirs = {normalize_path(os.path.normpath(d)) for d in args.include_dirs}
+    norm_include_files = {normalize_path(os.path.normpath(f)) for f in args.include_files}
+    norm_exclude_dirs = {normalize_path(os.path.normpath(d)) for d in args.exclude_dirs}
+    norm_exclude_files = {normalize_path(os.path.normpath(f)) for f in args.exclude_files}
+
 
     # Determine output filename
     current_dir_name = os.path.basename(os.getcwd())
-    output_file = f"__SUMMARY__{current_dir_name}.txt"
+    # Ensure filename is filesystem-friendly (replace invalid chars if dir name has them)
+    safe_dir_name = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in current_dir_name).strip()
+    output_file = f"__SUMMARY__{safe_dir_name}.txt"
 
     # Call the main function
     create_summary(
         output_filename=output_file,
-        exclude_dirs=args.exclude_dirs,
-        exclude_files=args.exclude_files,
-        include_patterns=include_patterns,
-        exclude_patterns=all_exclude_patterns # Pass combined patterns here
+        start_dir='.', # Run from current directory
+        include_dirs=norm_include_dirs,
+        include_files=norm_include_files,
+        include_patterns=include_patterns_from_file,
+        exclude_dirs=norm_exclude_dirs,
+        exclude_files=norm_exclude_files,
+        exclude_patterns=exclude_patterns_from_file, # Pass only patterns from file here
+        inclusion_mode=inclusion_mode_active
     )
 
 # Make sure this is the entry point if the script is run directly
-# (though setup.py uses cli_entry_point directly)
 if __name__ == "__main__":
     cli_entry_point()
